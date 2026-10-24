@@ -1,112 +1,97 @@
--- Aim Assist Duels (con camara)
--- Al disparar apunta al enemigo VISIBLE | U = ON/OFF | Sin menu
-
+-- SILENT AIM puro: disparas y pega al enemigo visible. No mueve la cámara.
+-- Solo redirige el raycast del disparo. Click izquierdo = disparar.
 local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
 local LocalPlayer = Players.LocalPlayer
-local Mouse = LocalPlayer:GetMouse()
-local Camera = Workspace.CurrentCamera
-
-local enabled = true
-local FOV = 320
-local MAX_DIST = 500
-
-print("Loaded! | Aim Assist Duels | U = ON/OFF")
-
-local function isEnemy(plr)
-    if not plr or plr == LocalPlayer then return false end
-    if LocalPlayer.Team and plr.Team then
-        return plr.Team ~= LocalPlayer.Team
-    end
-    if LocalPlayer.TeamColor and plr.TeamColor then
-        return plr.TeamColor ~= LocalPlayer.TeamColor
-    end
-    return true
+local Camera = workspace.CurrentCamera
+-- ====== CONFIG ======
+local FOV = 400              -- radio en píxeles (solo agarra enemigos dentro de esto)
+local HITBOX_SIZE = 10       -- agranda hitbox para asegurar el impacto
+local VISIBLE_ONLY = true    -- true = solo enemigos visibles en pantalla
+-- ====================
+-- Saber si está vivo
+local function isAlive(model)
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    return hum and hum.Health > 0
 end
-
-local function hasLineOfSight(fromPos, toPart)
-    local direction = toPart.Position - fromPos
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    local filter = {}
-    if LocalPlayer.Character then table.insert(filter, LocalPlayer.Character) end
-    for _, p in pairs(Players:GetPlayers()) do
-        if p.Character then table.insert(filter, p.Character) end
+-- Obtener enemigos (jugadores + NPCs)
+local function getTargets()
+    local list = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character and isAlive(plr.Character) then
+            table.insert(list, plr.Character)
+        end
     end
-    params.FilterDescendantsInstances = filter
-    params.IgnoreWater = true
-    local hit = Workspace:Raycast(fromPos, direction, params)
-    if not hit then return true end
-    return (hit.Position - fromPos).Magnitude >= direction.Magnitude - 3
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid") and isAlive(obj) then
+            if not Players:GetPlayerFromCharacter(obj) then
+                table.insert(list, obj)
+            end
+        end
+    end
+    return list
 end
-
-local function getBestTarget()
-    if not enabled then return nil end
-    local char = LocalPlayer.Character
-    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
-
-    local myRoot = char.HumanoidRootPart
-    local origin = Camera.CFrame.Position
-    local mousePos = Vector2.new(Mouse.X, Mouse.Y)
-    local best, bestDist = nil, FOV
-
-    for _, plr in pairs(Players:GetPlayers()) do
-        if isEnemy(plr) and plr.Character then
-            local enemy = plr.Character
-            local hum = enemy:FindFirstChildOfClass("Humanoid")
-            local head = enemy:FindFirstChild("Head")
-            local root = enemy:FindFirstChild("HumanoidRootPart")
-            local aim = head or root
-
-            if hum and hum.Health > 0 and aim and root then
-                if (root.Position - myRoot.Position).Magnitude <= MAX_DIST then
-                    local sp, on = Camera:WorldToViewportPoint(aim.Position)
-                    if on and sp.Z > 0 then
-                        local d = (mousePos - Vector2.new(sp.X, sp.Y)).Magnitude
-                        if d < bestDist and hasLineOfSight(origin, aim) then
-                            bestDist = d
-                            best = aim
-                        end
-                    end
+-- Enemigo más cercano al centro de la pantalla (o al cursor)
+local function getClosest()
+    local closest, shortest = nil, FOV
+    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    for _, model in ipairs(getTargets()) do
+        local part = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChildWhichIsA("BasePart")
+        if part then
+            local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+            if onScreen or not VISIBLE_ONLY then
+                local dist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+                if dist < shortest then
+                    shortest = dist
+                    closest = part
                 end
             end
         end
     end
-    return best
+    return closest
 end
-
-UserInputService.InputBegan:Connect(function(input, gp)
-    if gp then return end
-    if input.KeyCode == Enum.KeyCode.U then
-        enabled = not enabled
-        print(enabled and "Aim Assist: ON" or "Aim Assist: OFF")
+-- Hitbox expander
+RunService.Heartbeat:Connect(function()
+    for _, model in ipairs(getTargets()) do
+        for _, part in ipairs(model:GetDescendants()) do
+            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                if part.Size.Magnitude < HITBOX_SIZE then
+                    part.Size = Vector3.new(HITBOX_SIZE, HITBOX_SIZE, HITBOX_SIZE)
+                    part.CanCollide = false
+                    part.Transparency = 0.7
+                end
+            end
+        end
     end
 end)
-
-local holding = false
-
-UserInputService.InputBegan:Connect(function(input, gp)
-    if gp then return end
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        holding = true
+-- HOOK: intercepta el raycast del disparo y lo redirige al enemigo
+local mt = getrawmetatable(game)
+local oldNamecall = mt.__namecall
+setreadonly(mt, false)
+mt.__namecall = newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+    
+    if method == "Raycast" or method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist" then
+        local target = getClosest()
+        if target then
+            if method == "Raycast" and args[1] then
+                local ray = args[1]
+                local origin = ray.Origin
+                local dir = (target.Position - origin)
+                args[1] = Ray.new(origin, dir.Unit * dir.Magnitude * 2)
+            elseif method:find("FindPartOnRay") then
+                local ray = args[1]
+                if ray then
+                    local origin = ray.Origin
+                    local dir = (target.Position - origin)
+                    args[1] = Ray.new(origin, dir.Unit * dir.Magnitude * 2)
+                end
+            end
+        end
     end
+    
+    return oldNamecall(self, table.unpack(args))
 end)
-
-UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        holding = false
-    end
-end)
-
--- Al mantener clic: camara al enemigo visible (asi la bala pega)
-RunService.RenderStepped:Connect(function()
-    if not enabled or not holding then return end
-    local t = getBestTarget()
-    if t then
-        pcall(function()
-            Camera.CFrame = CFrame.new(Camera.CFrame.Position, t.Position)
-        end)
-    end
-end)
+setreadonly(mt, true)
+print("[SilentAim] Listo. Dispara y pega automaticamente al enemigo visible.")
